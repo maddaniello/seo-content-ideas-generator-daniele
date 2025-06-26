@@ -151,53 +151,100 @@ class SEOEditorialPlanner:
             # Prepara il prompt
             keywords_text = ", ".join([kw['keyword'] for kw in keywords[:20]])
             
-            prompt = f"""
-            Sei un esperto SEO e content marketer. Basandoti sulle seguenti informazioni:
-            
-            Sito: {site_info['nome_sito']}
-            URL: {site_info['url_sito']}
-            Descrizione: {site_info['descrizione_pagina']}
-            Obiettivi: {site_info['obiettivi']}
-            Argomenti da evitare: {site_info['argomenti_evitare']}
-            Keywords principali: {keywords_text}
-            
-            Genera 15 idee per articoli di blog ottimizzati SEO. Per ogni idea fornisci:
-            1. Titolo dell'articolo
-            2. Breve descrizione (2-3 righe)
-            3. Obiettivo specifico dell'articolo
-            4. Parole chiave target (3-5 keywords)
-            
-            Rispondi in formato JSON con questa struttura:
-            [
-                {
-                    "titolo": "Titolo articolo",
-                    "descrizione": "Descrizione dell'articolo",
-                    "obiettivo": "Obiettivo specifico",
-                    "keywords_target": ["keyword1", "keyword2", "keyword3"]
-                }
-            ]
-            """
+            prompt = f"""Sei un esperto SEO e content marketer. Basandoti sulle seguenti informazioni:
+
+Sito: {site_info['nome_sito']}
+URL: {site_info['url_sito']}
+Descrizione: {site_info['descrizione_pagina']}
+Obiettivi: {site_info['obiettivi']}
+Argomenti da evitare: {site_info['argomenti_evitare']}
+Keywords principali: {keywords_text}
+
+Genera 15 idee per articoli di blog ottimizzati SEO. Per ogni idea fornisci:
+1. Titolo dell'articolo
+2. Breve descrizione (2-3 righe)
+3. Obiettivo specifico dell'articolo
+4. Parole chiave target (3-5 keywords)
+
+Rispondi SOLO con un array JSON valido in questo formato:
+[
+    {{
+        "titolo": "Titolo articolo",
+        "descrizione": "Descrizione dell'articolo",
+        "obiettivo": "Obiettivo specifico",
+        "keywords_target": ["keyword1", "keyword2", "keyword3"]
+    }}
+]"""
             
             response = self.openai_client.chat.completions.create(
                 model="gpt-4",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.7,
-                max_tokens=2000
+                max_tokens=3000
             )
             
-            content = response.choices[0].message.content
-            # Estrai il JSON dalla risposta
-            json_match = re.search(r'\[.*\]', content, re.DOTALL)
-            if json_match:
-                return json.loads(json_match.group())
+            content = response.choices[0].message.content.strip()
+            
+            # Pulisci la risposta per estrarre solo il JSON
+            if content.startswith('```json'):
+                content = content.replace('```json', '').replace('```', '').strip()
+            elif content.startswith('```'):
+                content = content.replace('```', '').strip()
+            
+            # Trova l'array JSON
+            start_idx = content.find('[')
+            end_idx = content.rfind(']') + 1
+            
+            if start_idx != -1 and end_idx != -1:
+                json_content = content[start_idx:end_idx]
+                return json.loads(json_content)
             else:
+                st.error("Formato JSON non valido nella risposta OpenAI")
                 return []
                 
+        except json.JSONDecodeError as e:
+            st.error(f"Errore parsing JSON: {str(e)}")
+            return []
         except Exception as e:
             st.error(f"Errore OpenAI: {str(e)}")
             return []
     
-    def create_editorial_plan(self, site_info: Dict, keywords: List[Dict], content_ideas: List[Dict]) -> pd.DataFrame:
+    def generate_fallback_content_ideas(self, site_info: Dict, keywords: List[Dict]) -> List[Dict]:
+        """Genera idee di contenuto di fallback se OpenAI fallisce"""
+        fallback_ideas = []
+        
+        # Usa le prime 15 keywords per creare idee base
+        top_keywords = keywords[:15] if len(keywords) >= 15 else keywords
+        
+        for i, kw in enumerate(top_keywords):
+            idea = {
+                "titolo": f"Guida Completa a {kw['keyword'].title()}",
+                "descrizione": f"Un articolo approfondito su {kw['keyword']} per {site_info['nome_sito']}. Coprirà tutti gli aspetti principali per soddisfare le ricerche degli utenti.",
+                "obiettivo": "Aumentare traffico organico e posizionamento per keyword target",
+                "keywords_target": [kw['keyword']]
+            }
+            fallback_ideas.append(idea)
+        
+        # Se non ci sono abbastanza keywords, crea idee generiche
+        while len(fallback_ideas) < 15:
+            generic_topics = [
+                "Tendenze del Settore 2024",
+                "Domande Frequenti",
+                "Confronto Soluzioni",
+                "Caso Studio Successo",
+                "Errori Comuni da Evitare"
+            ]
+            
+            topic = generic_topics[len(fallback_ideas) % len(generic_topics)]
+            idea = {
+                "titolo": f"{topic} - {site_info['nome_sito']}",
+                "descrizione": f"Articolo su {topic.lower()} per il settore di {site_info['nome_sito']}",
+                "obiettivo": site_info['obiettivi'][:100] + "..." if len(site_info['obiettivi']) > 100 else site_info['obiettivi'],
+                "keywords_target": [kw['keyword'] for kw in keywords[:3]]
+            }
+            fallback_ideas.append(idea)
+        
+        return fallback_ideas[:15]
         """Crea il piano editoriale finale"""
         editorial_data = []
         
@@ -335,6 +382,15 @@ if submitted and hasattr(st.session_state, 'apis_configured'):
             domain = url_sito.replace('https://', '').replace('http://', '').replace('www.', '').split('/')[0]
             main_keywords = st.session_state.planner.get_semrush_keywords(domain)
             
+            if not main_keywords:
+                st.warning("⚠️ Nessuna keyword trovata da SEMrush per il dominio principale. Verifica l'API key e che il dominio sia indicizzato.")
+                # Crea keywords di esempio basate sul sito
+                main_keywords = [
+                    {'keyword': nome_sito.lower(), 'position': '1', 'volume': '1000', 'cpc': '1.0'},
+                    {'keyword': f"{nome_sito.lower()} servizi", 'position': '5', 'volume': '500', 'cpc': '1.5'},
+                    {'keyword': f"{nome_sito.lower()} contatti", 'position': '3', 'volume': '200', 'cpc': '0.5'}
+                ]
+            
             # Step 2: Analisi competitor
             status_text.text("🏆 Analizzando competitor...")
             progress_bar.progress(40)
@@ -350,6 +406,11 @@ if submitted and hasattr(st.session_state, 'apis_configured'):
             progress_bar.progress(60)
             
             content_ideas = st.session_state.planner.generate_content_ideas(site_info, all_keywords)
+            
+            # Se OpenAI fallisce, usa il fallback
+            if not content_ideas:
+                st.warning("⚠️ Problema con OpenAI, utilizzo generatore di backup...")
+                content_ideas = st.session_state.planner.generate_fallback_content_ideas(site_info, all_keywords)
             
             # Step 4: Creazione piano editoriale
             status_text.text("📝 Creando il piano editoriale...")
